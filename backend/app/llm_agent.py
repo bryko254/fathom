@@ -7,13 +7,17 @@ Any other OpenAI-compatible base URL works through the same three environment va
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterator
 
 from app.config import Settings
-from app.mock_agent import MockAnalyst, _sid, _step
+from app.mock_agent import DEMO_SAMPLE_IDS, MockAnalyst, _group_counts, _is_overview, _sid, _step
 from app.sandbox import SandboxRunner
 from app.sanity import assess
+
+logger = logging.getLogger("fathom.inference")
+MAX_TOKENS = 8192
 
 SYSTEM = """You are Fathom, an analyst who answers questions about a SQLite database by doing the work.
 You only know the database through tool results. Never invent a number, a column, or a row.
@@ -34,16 +38,18 @@ Rules:
 - dashboard.sql must be rerunnable SELECT statements.
 - Python may import only json, math, statistics, datetime, collections, re, itertools. Read rows from INPUT. Set RESULT.
 - Finish within 8 actions.
-- A containment probe has already been executed and blocked. Do not emit DROP, writes, network calls, or secret reads.
-- Your LLM calls are served by Vultr Serverless Inference. Do not ask for another provider.
+- Do not emit DROP, writes, network calls, or secret reads. If you do, the guard will block them and you must continue with a read.
+- Your calls are served by Vultr Serverless Inference. Do not ask for another provider.
+- For a question about what the database contains, write a plain-English overview grouped by domain. Use the row counts you were given. Do not paste CREATE statements or sqlite_master.
 """
 
 
 class LlmAnalyst:
-    def __init__(self, *, runner: SandboxRunner, settings: Settings, sample_id: str | None) -> None:
+    def __init__(self, *, runner: SandboxRunner, settings: Settings, sample_id: str | None, client=None) -> None:
         self.runner = runner
         self.settings = settings
         self.sample_id = sample_id
+        self.client = client
         self.queries: list[dict] = []
         self._last_rows: list[dict] = []
         self._last_columns: list[str] = []
@@ -54,7 +60,11 @@ class LlmAnalyst:
         if not explorer.tables:
             yield {"type": "error", "error": "Could not read the schema."}
             return
-        yield from explorer._containment()
+        if self.sample_id in DEMO_SAMPLE_IDS:
+            yield from explorer._containment()
+        if _is_overview(question):
+            yield from self._overview(explorer, question)
+            return
         schema = [
             {"table": name, "columns": info["columns"]}
             for name, info in explorer.tables.items()
@@ -73,12 +83,10 @@ class LlmAnalyst:
                 ),
             },
         ]
-        try:
-            from openai import OpenAI
-        except ImportError as exc:
-            yield {"type": "error", "error": f"OpenAI client is not installed: {exc}"}
+        client = self.client or _openai_client(self.settings)
+        if client is None:
+            yield {"type": "error", "error": "OpenAI client is not installed."}
             return
-        client = OpenAI(base_url=self.settings.llm_base_url, api_key=self.settings.llm_api_key, timeout=90)
         for _ in range(8):
             try:
                 action, raw = _complete(client, self.settings.llm_model, messages)
@@ -102,6 +110,9 @@ class LlmAnalyst:
                 events, payload = self._run_sql(purpose, sql, fixed=bool(self.queries and self.queries[-1]["status"] in {"error", "warning"}))
                 for event in events:
                     yield event
+                if payload.get("blocked"):
+                    messages.append({"role": "user", "content": json.dumps(payload)})
+                    continue
                 if payload.get("needsConfirmation"):
                     yield {
                         "type": "confirmation",
@@ -148,15 +159,26 @@ class LlmAnalyst:
         running = _step(step_id, "sql", purpose, "running", sql=sql, detail="Dispatching to the sandbox.")
         result = self.runner.run_sql(sql)
         warnings = assess(sql, result) if result.ok else []
-        if result.needs_confirmation:
-            done = _step(step_id, "guard", "Waiting for confirmation", "warning", sql=sql, detail=result.error)
-            self.queries.append({"sql": sql, "status": "confirmation", "purpose": purpose})
-            return [running, done], {
-                "ok": False,
-                "needsConfirmation": True,
-                "confirmToken": result.confirm_token,
-                "error": result.error,
-            }
+        if result.blocked or result.needs_confirmation:
+            done = _step(
+                step_id,
+                "guard",
+                "Containment: model statement blocked",
+                "blocked" if result.blocked and not result.needs_confirmation else "warning",
+                sql=sql,
+                detail=result.error,
+                error=result.error,
+            )
+            if result.needs_confirmation:
+                self.queries.append({"sql": sql, "status": "confirmation", "purpose": purpose})
+                return [running, done], {
+                    "ok": False,
+                    "needsConfirmation": True,
+                    "confirmToken": result.confirm_token,
+                    "error": result.error,
+                }
+            self.queries.append({"sql": sql, "status": "blocked", "purpose": purpose})
+            return [running, done], {"ok": False, "blocked": True, "error": result.error}
         if not result.ok:
             status, detail = "error", result.error or "The sandbox rejected the statement."
         elif warnings:
@@ -231,19 +253,142 @@ class LlmAnalyst:
                 "table": table if isinstance(table, dict) else None,
                 "dashboard": dashboard,
                 "queries": [{"sql": item["sql"], "status": item["status"], "purpose": item["purpose"]} for item in self.queries],
+                "provider": "openai",
+                "model": self.settings.llm_model,
+            },
+        }
+
+    def _overview(self, explorer: MockAnalyst, question: str) -> Iterator[dict]:
+        yield _step(
+            _sid(),
+            "plan",
+            "Plan an overview",
+            "ok",
+            detail="I'll count every table in the sandbox, then ask the model for a plain-English overview grouped by domain.",
+        )
+        counted = yield from explorer._count_tables()
+        rows = counted.rows if counted and counted.ok else []
+        self.queries.extend(explorer.queries)
+        grouped = _group_counts(rows)
+        client = self.client or _openai_client(self.settings)
+        if client is None:
+            yield {"type": "error", "error": "OpenAI client is not installed."}
+            return
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Fathom. Write a plain-English overview of a database from sandbox row counts. "
+                    "Do not invent numbers. Group tables by the prefix before the first underscore. "
+                    "Say what the application appears to do. Reply with one JSON object and nothing else: "
+                    '{"action":"finish","answer":"..."}'
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps({"question": question, "counts": rows, "domains": grouped}),
+            },
+        ]
+        try:
+            action, _raw = _complete(client, self.settings.llm_model, messages)
+        except ValueError as exc:
+            messages.append({"role": "user", "content": "Reply with one JSON object: {\"action\":\"finish\",\"answer\":\"...\"}"})
+            try:
+                action, _raw = _complete(client, self.settings.llm_model, messages)
+            except ValueError as again:
+                yield {"type": "error", "error": f"Vultr Serverless Inference did not return an answer: {again}"}
+                return
+        answer = str(action.get("answer") or "").strip()
+        if not answer:
+            yield {"type": "error", "error": "Vultr Serverless Inference returned no overview text."}
+            return
+        logger.info("answer provider=openai model=%s kind=overview", self.settings.llm_model)
+        yield {
+            "type": "result",
+            "result": {
+                "answer": answer,
+                "chart": {
+                    "type": "bar",
+                    "title": "Rows by domain",
+                    "xKey": "domain",
+                    "yKey": "row_count",
+                    "data": grouped,
+                },
+                "table": {"title": "Tables by domain", "columns": ["domain", "tables", "row_count"], "rows": grouped},
+                "dashboard": {
+                    "title": "Database overview",
+                    "widgets": [
+                        {
+                            "title": "Rows by domain",
+                            "kind": "chart",
+                            "sql": next((item["sql"] for item in explorer.queries if "COUNT(*)" in item["sql"]), "SELECT 1"),
+                            "spec": {"type": "bar", "xKey": "domain", "yKey": "row_count"},
+                            "preview": {"columns": ["domain", "tables", "row_count"], "rows": grouped},
+                        }
+                    ],
+                },
+                "queries": [{"sql": item["sql"], "status": item["status"], "purpose": item["purpose"]} for item in self.queries],
+                "provider": "openai",
+                "model": self.settings.llm_model,
             },
         }
 
 
+def _openai_client(settings: Settings):
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return None
+    return OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key or "missing", timeout=90)
+
+
+def message_text(message) -> str:
+    """Prefer assistant content. Some Vultr models leave it empty and put the text in reasoning."""
+    if isinstance(message, dict):
+        content = message.get("content") or ""
+        extra = message
+    else:
+        content = getattr(message, "content", None) or ""
+        extra = getattr(message, "model_extra", None) or {}
+        if not isinstance(extra, dict):
+            extra = {}
+    reasoning = ""
+    if not isinstance(message, dict):
+        reasoning = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None) or ""
+    if not reasoning:
+        reasoning = extra.get("reasoning_content") or extra.get("reasoning") or ""
+    content = str(content).strip()
+    reasoning = str(reasoning).strip()
+    return content or reasoning
+
+
 def _complete(client, model: str, messages: list[dict]) -> tuple[dict, str]:
+    response, text = _invoke(client, model, messages, MAX_TOKENS)
+    finish = response.choices[0].finish_reason
+    if not text and finish == "length":
+        logger.info("inference empty content finish_reason=length; retrying with more tokens")
+        response, text = _invoke(client, model, messages, MAX_TOKENS * 2)
+    if not text:
+        raise ValueError(f"The model returned no text (finish_reason={response.choices[0].finish_reason}).")
+    return _parse_action(text), text
+
+
+def _invoke(client, model: str, messages: list[dict], max_tokens: int):
+    logger.info("inference request model=%s max_tokens=%s", model, max_tokens)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=0.1,
-        max_tokens=1800,
+        max_tokens=max_tokens,
     )
-    raw = response.choices[0].message.content or ""
-    return _parse_action(raw), raw
+    text = message_text(response.choices[0].message)
+    logger.info(
+        "inference response model=%s finish_reason=%s text_chars=%s",
+        model,
+        response.choices[0].finish_reason,
+        len(text),
+    )
+    return response, text
 
 
 def _parse_action(raw: str) -> dict:

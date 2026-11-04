@@ -19,6 +19,24 @@ from app.clock import LEDGER_TODAY, calendar_year, previous_month, previous_quar
 from app.sandbox import SandboxRunner
 from app.sanity import assess
 
+DEMO_SAMPLE_IDS = frozenset({"harbor", "northline", "pesaledger"})
+
+DOMAIN_HINTS = {
+    "auth": "sign-in, users, and permissions",
+    "account": "accounts and identity",
+    "admin": "Django admin",
+    "django": "Django framework bookkeeping",
+    "session": "login sessions",
+    "therapist": "therapist profiles and clinical records",
+    "moodtracker": "mood tracking",
+    "mood": "mood tracking",
+    "payment": "payments and billing",
+    "billing": "payments and billing",
+    "order": "orders",
+    "subscription": "subscriptions",
+    "customer": "customers",
+}
+
 FANOUT_CODE = """
 rows = INPUT["rows"]
 ids = [r.get("account_id") for r in rows]
@@ -62,8 +80,11 @@ class MockAnalyst:
         if route == "write":
             yield from self._write(question)
             return
-        yield from self._containment()
-        if route == "saas_churn":
+        if self.sample_id in DEMO_SAMPLE_IDS:
+            yield from self._containment()
+        if route == "overview":
+            yield from self._overview(question)
+        elif route == "saas_churn":
             yield from self._saas_churn()
         elif route == "ecom_sales":
             yield from self._ecom_sales()
@@ -177,15 +198,21 @@ class MockAnalyst:
             except Exception:
                 columns = []
             self.tables[row["name"]] = {"sql": row["sql"], "columns": columns}
-        names = ", ".join(self.tables)
+        shown = list(self.tables)
+        preview = ", ".join(shown[:12])
+        if len(shown) > 12:
+            preview = f"{preview}, and {len(shown) - 12} more"
         yield _step(
             step_id,
             "explore",
             "Explore the schema",
             "ok",
-            detail=f"Found {len(self.tables)} tables: {names}.",
-            columns=result.columns,
-            rows=[{"name": name, "columns": ", ".join(info["columns"])} for name, info in self.tables.items()],
+            detail=f"Found {len(self.tables)} tables: {preview}.",
+            columns=["table", "columns"],
+            rows=[
+                {"table": name, "columns": ", ".join(info["columns"]) or "(no parsed columns)"}
+                for name, info in self.tables.items()
+            ],
             elapsedMs=result.elapsed_ms,
         )
         sample_tables = [name for name in ("subscriptions", "orders", "transactions", "accounts", "customers") if name in self.tables][:2]
@@ -548,6 +575,61 @@ class MockAnalyst:
         ]
         yield _result(answer, chart, table, f"PesaLedger operations, {label}", widgets, self.queries)
 
+    def _count_tables(self):
+        names = [name for name in self.tables if '"' not in name and "'" not in name]
+        if not names:
+            return None
+        parts = [
+            f"SELECT '{name}' AS table_name, COUNT(*) AS row_count FROM \"{name}\""
+            for name in names
+        ]
+        sql = " UNION ALL ".join(parts)
+        result, _warnings = yield from self._sql("Count rows in each table", sql, role="answer")
+        return result
+
+    def _overview(self, question: str) -> Iterator[dict]:
+        yield _step(
+            _sid(),
+            "plan",
+            "Plan an overview",
+            "ok",
+            detail="I'll count rows in every table, group the names by domain, and describe what the database appears to be for. No CREATE statements.",
+        )
+        counted = yield from self._count_tables()
+        rows = counted.rows if counted and counted.ok else []
+        grouped = _group_counts(rows)
+        answer = _narrate_overview(question, rows, grouped)
+        chart = {
+            "type": "bar",
+            "title": "Rows by domain",
+            "xKey": "domain",
+            "yKey": "row_count",
+            "data": grouped,
+        }
+        table = {
+            "title": "Tables by domain",
+            "columns": ["domain", "tables", "row_count"],
+            "rows": grouped,
+        }
+        count_sql = next((item["sql"] for item in self.queries if "COUNT(*)" in item["sql"]), "SELECT 1")
+        widgets = [
+            {
+                "title": "Rows by domain",
+                "kind": "chart",
+                "sql": count_sql,
+                "spec": {"type": "bar", "title": "Rows by domain", "xKey": "domain", "yKey": "row_count"},
+                "preview": {"columns": ["domain", "tables", "row_count"], "rows": grouped},
+            },
+            {
+                "title": "Tables by domain",
+                "kind": "table",
+                "sql": count_sql,
+                "spec": {},
+                "preview": {"columns": ["domain", "tables", "row_count"], "rows": grouped},
+            },
+        ]
+        yield _result(answer, chart, table, "Database overview", widgets, self.queries)
+
     def _generic(self, question: str) -> Iterator[dict]:
         table, wrong, real = _generic_target(self.tables)
         yield _step(
@@ -678,10 +760,71 @@ class MockAnalyst:
         return result
 
 
+def _is_overview(question: str) -> bool:
+    q = question.lower().replace("’", "'")
+    phrases = (
+        "what is on this",
+        "what's on this",
+        "what is in this",
+        "what's in this",
+        "what is in here",
+        "what's in here",
+        "what is this db",
+        "what's this db",
+        "what is this database",
+        "what's this database",
+        "what tables",
+        "which tables",
+        "overview",
+        "describe the database",
+        "describe this database",
+        "describe the db",
+        "what data",
+        "what's on the db",
+        "what is on the db",
+    )
+    return any(phrase in q for phrase in phrases)
+
+
+def _group_counts(rows: list[dict]) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        name = str(row.get("table_name") or "")
+        domain = name.split("_", 1)[0] if "_" in name else (name or "other")
+        bucket = grouped.setdefault(domain, {"domain": domain, "tables": 0, "row_count": 0, "names": []})
+        bucket["tables"] += 1
+        bucket["row_count"] += int(row.get("row_count") or 0)
+        bucket["names"].append(name)
+    ordered = sorted(grouped.values(), key=lambda item: (-item["row_count"], item["domain"]))
+    return [{"domain": item["domain"], "tables": item["tables"], "row_count": item["row_count"], "names": item["names"]} for item in ordered]
+
+
+def _narrate_overview(question: str, rows: list[dict], grouped: list[dict]) -> str:
+    if not rows:
+        return "The sandbox found no tables to count."
+    total_rows = sum(int(row.get("row_count") or 0) for row in rows)
+    sentences = [
+        f"This database has {len(rows)} tables and {total_rows:,} rows.",
+        "The names cluster by the word before the first underscore.",
+    ]
+    for item in grouped:
+        hint = DOMAIN_HINTS.get(item["domain"], "application data")
+        names = ", ".join(item["names"][:4])
+        extra = f" and {item['tables'] - 4} more" if item["tables"] > 4 else ""
+        sentences.append(
+            f"{item['domain']} is {item['tables']} table{'s' if item['tables'] != 1 else ''} "
+            f"and {item['row_count']:,} rows ({names}{extra}), which looks like {hint}."
+        )
+    sentences.append("Those counts are COUNT(*) results from the sandbox.")
+    return " ".join(sentences)
+
+
 def _route(question: str, tables: set[str], sample_id: str | None) -> str:
     import re
 
     q = question.lower()
+    if _is_overview(q):
+        return "overview"
     if re.search(r"\b(drop table|delete from|truncate|alter table|insert into)\b", q):
         return "write"
     if re.search(r"\b(delete|remove|insert|alter|truncate)\b", q) and re.search(r"\b(row|rows|record|table|database)\b", q):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import sqlite3
 import threading
@@ -23,6 +24,7 @@ from app.snapshot import snapshot_connection
 from app.sql_import import SqlImportError, load_sql_dump
 from app.store import Store
 
+logger = logging.getLogger("fathom")
 settings: Settings = load_settings()
 store = Store(settings.data_dir / "app.sqlite")
 samples: dict[str, Path] = {}
@@ -207,6 +209,19 @@ def ask(session_id: str, body: AskIn) -> StreamingResponse:
         try:
             store.add_message(session_id, "user", body.question)
             analyst = _analyst(session)
+            model_label = settings.llm_model if settings.provider == "openai" else "fallback"
+            yield _sse(
+                {
+                    "type": "step",
+                    "step": {
+                        "id": "provider",
+                        "kind": "plan",
+                        "title": "Analyst",
+                        "status": "ok",
+                        "detail": f"provider={settings.provider} model={model_label}",
+                    },
+                }
+            )
             result_payload = None
             steps = []
             for event in analyst.run(body.question):
@@ -214,6 +229,14 @@ def ask(session_id: str, body: AskIn) -> StreamingResponse:
                     steps.append(event["step"])
                 if event["type"] == "result":
                     result_payload = event["result"]
+                    result_payload["provider"] = settings.provider
+                    result_payload["model"] = settings.llm_model if settings.provider == "openai" else None
+                    logger.info(
+                        "answer provider=%s model=%s sample=%s",
+                        result_payload["provider"],
+                        result_payload["model"],
+                        session.sample_id,
+                    )
                     dashboard = result_payload.get("dashboard")
                     if dashboard and dashboard.get("widgets"):
                         dashboard["widgets"] = _hydrate_metrics(session, dashboard["widgets"])
