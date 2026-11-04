@@ -56,5 +56,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Optional HTTPS front door. Enable with: docker compose --profile https up -d
+  # Set FATHOM_DOMAIN (e.g. 45-77-121-63.sslip.io) and WEB_PORT=127.0.0.1:43123.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    network_mode: host
+    environment:
+      FATHOM_DOMAIN: ${FATHOM_DOMAIN:-localhost}
+      FATHOM_UPSTREAM: 127.0.0.1:${WEB_UPSTREAM_PORT:-43123}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
 volumes:
   fathom-data:
+  caddy-data:
+  caddy-config:

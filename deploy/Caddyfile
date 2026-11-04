@@ -1,0 +1,22 @@
+# Public HTTPS front door for Fathom on a Vultr VM.
+# Caddy obtains a Let's Encrypt certificate for {$FATHOM_DOMAIN} and
+# redirects plain HTTP to HTTPS automatically.
+{$FATHOM_DOMAIN} {
+	encode zstd gzip {
+		# Never compress the streamed answer; compression buffers it.
+		match {
+			not header Content-Type text/event-stream*
+		}
+	}
+	request_body {
+		max_size 26MB
+	}
+	reverse_proxy {$FATHOM_UPSTREAM:127.0.0.1:43123} {
+		# Flush every write so streamed answers arrive token by token.
+		flush_interval -1
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+}
