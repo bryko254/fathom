@@ -2,12 +2,7 @@
 # Caddy obtains a Let's Encrypt certificate for {$FATHOM_DOMAIN} and
 # redirects plain HTTP to HTTPS automatically.
 {$FATHOM_DOMAIN} {
-	encode zstd gzip {
-		# Never compress the streamed answer; compression buffers it.
-		match {
-			not header Content-Type text/event-stream*
-		}
-	}
+	# No `encode` here: compression would buffer streamed answers.
 	request_body {
 		max_size 26MB
 	}
