@@ -1,5 +1,6 @@
 "use client";
 
+import { newId } from "@/lib/utils";
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -90,10 +91,10 @@ export function Workspace() {
     async (text: string, sessionId: string) => {
       const trimmed = text.trim();
       if (!trimmed || running) return;
-      const assistantId = crypto.randomUUID();
+      const assistantId = newId();
       setMessages((current) => [
         ...current,
-        { id: crypto.randomUUID(), role: "user", content: trimmed },
+        { id: newId(), role: "user", content: trimmed },
         { id: assistantId, role: "assistant", content: "", steps: [], result: null },
       ]);
       setQuestion("");
@@ -200,7 +201,7 @@ export function Workspace() {
       setMessages((current) => [
         ...current,
         {
-          id: crypto.randomUUID(),
+          id: newId(),
           role: "assistant",
           content: "Confirmed. The sandbox ran that statement once. DDL is still blocked.",
         },
