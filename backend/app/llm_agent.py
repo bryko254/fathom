@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import time
 from collections.abc import Iterator
 
 from app.config import Settings
@@ -18,7 +20,9 @@ from app.sandbox import SandboxRunner
 from app.sanity import assess
 
 logger = logging.getLogger("fathom.inference")
-MAX_TOKENS = 8192
+MAX_TOKENS = 3072
+MAX_ACTIONS = 6
+THINKING = os.environ.get("LLM_THINKING", "off").strip().lower() in {"1", "on", "true"}
 
 SYSTEM = """You are Fathom, an analyst who answers questions about a SQLite database by doing the work.
 You only know the database through tool results. Never invent a number, a column, or a row.
@@ -38,7 +42,8 @@ Rules:
 - Prefer aggregations for charts.
 - dashboard.sql must be rerunnable SELECT statements.
 - Python may import only json, math, statistics, datetime, collections, re, itertools. Read rows from INPUT. Set RESULT.
-- Finish within 8 actions.
+- Finish within 5 actions. Combine questions into one aggregate query where you can; do not page through rows.
+- Keep finish small: answer under 150 words, leave chart.data empty (it is filled from your last successful query, so make that query the chart data), table.rows at most 12, dashboard at most 4 widgets.
 - Do not emit DROP, writes, network calls, or secret reads. If you do, the guard will block them and you must continue with a read.
 - Your calls are served by Vultr Serverless Inference. Do not ask for another provider.
 - For a question about what the database contains, write a plain-English overview grouped by domain. Use the row counts you were given. Do not paste CREATE statements or sqlite_master.
@@ -85,7 +90,7 @@ class LlmAnalyst:
         if client is None:
             yield {"type": "error", "error": "OpenAI client is not installed."}
             return
-        for _ in range(8):
+        for _ in range(MAX_ACTIONS):
             try:
                 action, raw = _complete(client, self.settings.llm_model, messages)
             except ValueError as exc:
@@ -157,7 +162,7 @@ class LlmAnalyst:
                 return
             else:
                 messages.append({"role": "user", "content": json.dumps({"ok": False, "error": "unknown action"})})
-        yield {"type": "error", "error": "The analyst stopped after 8 actions without a final answer."}
+        yield {"type": "error", "error": f"The analyst stopped after {MAX_ACTIONS} actions without a final answer."}
 
     def _run_sql(self, purpose: str, sql: str, *, fixed: bool) -> tuple[list[dict], dict]:
         step_id = _sid()
@@ -354,7 +359,7 @@ def _openai_client(settings: Settings):
         from openai import OpenAI
     except ImportError:
         return None
-    return OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key or "missing", timeout=90)
+    return OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key or "missing", timeout=60, max_retries=1)
 
 
 def message_text(message) -> str:
@@ -378,36 +383,43 @@ def message_text(message) -> str:
 
 
 def _complete(client, model: str, messages: list[dict]) -> tuple[dict, str]:
+    """One call, plus at most one short retry when the reply is cut off or unreadable."""
     response, text = _invoke(client, model, messages, MAX_TOKENS)
     finish = response.choices[0].finish_reason
-    if not text and finish == "length":
-        logger.info("inference empty content finish_reason=length; retrying with more tokens")
-        response, text = _invoke(client, model, messages, MAX_TOKENS * 2)
-    if not text:
-        raise ValueError(f"The model returned no text (finish_reason={response.choices[0].finish_reason}).")
-    try:
-        return _parse_action(text), text
-    except ValueError:
-        logger.info("unparseable model reply; retrying with a stricter prompt")
-    retry = messages + [{"role": "assistant", "content": text[:4000]}, {"role": "user", "content": STRICT_RETRY}]
+    if text:
+        try:
+            return _parse_action(text), text
+        except ValueError:
+            logger.info("unparseable model reply finish_reason=%s; retrying once with a stricter prompt", finish)
+    retry = list(messages)
+    if text:
+        retry.append({"role": "assistant", "content": text[:2000]})
+    retry.append({"role": "user", "content": STRICT_RETRY + (" Your reply was cut off; keep it short." if finish == "length" else "")})
     _, text2 = _invoke(client, model, retry, MAX_TOKENS)
-    return _parse_action(text2 or ""), text2
+    if not text2:
+        raise ValueError("The model returned no text after a retry.")
+    return _parse_action(text2), text2
 
 
 def _invoke(client, model: str, messages: list[dict], max_tokens: int):
     logger.info("inference request model=%s max_tokens=%s", model, max_tokens)
+    started = time.perf_counter()
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=0.1,
         max_tokens=max_tokens,
+        **({} if THINKING else {"extra_body": {"chat_template_kwargs": {"thinking": False}}}),
     )
     text = message_text(response.choices[0].message)
+    usage = getattr(response, "usage", None)
     logger.info(
-        "inference response model=%s finish_reason=%s text_chars=%s",
+        "inference response model=%s finish_reason=%s text_chars=%s completion_tokens=%s seconds=%.2f",
         model,
         response.choices[0].finish_reason,
         len(text),
+        getattr(usage, "completion_tokens", None),
+        time.perf_counter() - started,
     )
     return response, text
 

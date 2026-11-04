@@ -107,7 +107,7 @@ def test_message_text_falls_back_to_reasoning():
     assert message_text({"content": "from content", "reasoning": "ignored"}) == "from content"
 
 
-def test_empty_length_response_retries_with_more_tokens():
+def test_empty_length_response_retries_once_short():
     calls = []
 
     class Completions:
@@ -129,8 +129,9 @@ def test_empty_length_response_retries_with_more_tokens():
     client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     action, raw = _complete(client, "deepseek-v4.1-flash-1017", [{"role": "user", "content": "overview"}])
     assert action["answer"] == "Four domains."
-    assert calls[0]["max_tokens"] >= 8192
-    assert calls[1]["max_tokens"] > calls[0]["max_tokens"]
+    assert len(calls) == 2
+    assert calls[0]["max_tokens"] <= 4096
+    assert "cut off" in calls[1]["messages"][-1]["content"]
     assert "Four domains" in raw
 
 
