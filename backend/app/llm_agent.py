@@ -12,6 +12,7 @@ import os
 import re
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 from app.config import Settings
 from app.mock_agent import DEMO_SAMPLE_IDS, MockAnalyst, _group_counts, _is_overview, _narrate_overview, _sid, _step
@@ -228,15 +229,17 @@ class LlmAnalyst:
         table = action.get("table")
         dashboard = action.get("dashboard")
         if isinstance(dashboard, dict):
+            raw_widgets = [w for w in (dashboard.get("widgets") or [])[:6] if isinstance(w, dict)]
+            previews = self._widget_previews([str(w.get("sql") or "") for w in raw_widgets])
             widgets = []
-            for widget in dashboard.get("widgets") or []:
+            for widget, preview in zip(raw_widgets, previews):
                 widgets.append(
                     {
                         "title": widget.get("title") or "Query",
                         "kind": widget.get("kind") or "table",
                         "sql": widget.get("sql") or "",
                         "spec": widget.get("spec") or {},
-                        "preview": {"columns": self._last_columns, "rows": self._last_rows[:20]},
+                        "preview": preview,
                     }
                 )
             dashboard = {"title": dashboard.get("title") or "Dashboard", "widgets": widgets}
@@ -267,6 +270,26 @@ class LlmAnalyst:
                 "model": self.settings.llm_model,
             },
         }
+
+    def _widget_previews(self, sqls: list[str]) -> list[dict]:
+        """Run each widget's own SELECT in its own sandbox (in parallel) so every tile shows its data."""
+        fallback = {"columns": self._last_columns, "rows": self._last_rows[:20]}
+
+        def one(sql: str) -> dict:
+            if not sql.strip():
+                return fallback
+            try:
+                result = self.runner.run_sql(sql)
+            except Exception:  # noqa: BLE001
+                return fallback
+            if result.ok and not result.blocked:
+                return {"columns": result.columns, "rows": result.rows[:20]}
+            return {"columns": [], "rows": [], "error": result.error}
+
+        if not sqls:
+            return []
+        with ThreadPoolExecutor(max_workers=min(4, len(sqls))) as pool:
+            return list(pool.map(one, sqls))
 
     def _overview(self, explorer: MockAnalyst, question: str) -> Iterator[dict]:
         yield _step(
