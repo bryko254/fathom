@@ -1,10 +1,48 @@
 # Fathom
 
-Fathom is an autonomous database copilot. You connect a SQL database, upload a SQLite file or a dump, or open a bundled ledger. You ask in plain English. The agent explores the schema, writes SQL, runs it in a disposable sandbox, checks the result, and fixes the query when the sandbox says it is wrong. The answer is a table, a chart, a short explanation, and a dashboard you can refresh.
+**An AI database copilot that does the work, inside a sandbox, on Vultr.**
+
+**Live:** https://45-77-121-63.sslip.io · **Repo:** https://github.com/bryko254/fathom
+
+Fathom is an autonomous database copilot. You connect a SQL database, upload a SQLite file or a dump (up to 25 MB), or open a bundled ledger. You ask in plain English. The agent explores the schema, writes SQL, runs it in a disposable sandbox, checks the result, and fixes the query when the sandbox says it is wrong. The answer is a table, a chart, a short explanation, and a dashboard you can refresh.
 
 It is built for the [Vultr Agent Rush hackathon](https://lablab.ai/ai-hackathons/vultr-hackathon), Challenge 1 (Blast Radius Zero): a web agent that does real work inside a sandbox on Vultr, with the model on Vultr Serverless Inference.
 
 Submissions close **8 Nov 2026, 22:00 UTC**.
+
+## Screenshots
+
+<!-- Replace with real captures from the live app. -->
+| Ask a ledger | Containment in the timeline | Containment drill |
+| --- | --- | --- |
+| `docs/screenshot-ask.png` (placeholder) | `docs/screenshot-blocked.png` (placeholder) | `docs/screenshot-drill.png` (placeholder) |
+
+## How Fathom uses Vultr
+
+| Vultr product | What it does in Fathom |
+| --- | --- |
+| **Vultr Cloud Compute** | One VM (Ubuntu 24.04, 1 vCPU, 2 GB, Los Angeles) runs the whole stack with Docker Compose: Caddy (HTTPS), the Next.js UI, the FastAPI control plane, and every sandbox container. The control plane holds credentials and dispatches work; it never runs the analyst's SQL in its own process. |
+| **Vultr Serverless Inference** | Every agent LLM call goes to the OpenAI-compatible endpoint `https://api.vultrinference.com/v1` with the DeepSeek model `deepseek-v4.1-flash-1017` (`LLM_MODEL`). The model plans, writes SQL and Python, reads sandbox errors, and retries. No GPU is needed on the VM. `/backend/health` on the live site reports the provider, base URL, and model. |
+| **Docker sandbox on the Vultr VM** | Each SQL or Python step runs in a fresh `fathom-sandbox` container on the same VM: `--network none`, read-only root, `--cap-drop ALL`, no-new-privileges, pid/memory/CPU caps, read-only data volume, removed after the step. This is the containment boundary. |
+| **Vultr Managed Database** (optional) | A Postgres you can point Fathom at. The control plane snapshots it read-only into SQLite; the password never enters the sandbox. |
+
+## Containment and safety
+
+The model is treated as untrusted. Fathom contains it in layers:
+
+1. **SQL guard (before anything runs).** SQLGlot parses every statement. Reads run. A single `INSERT`/`UPDATE`/`DELETE` needs an explicit confirmation token. `DROP`, `ALTER`, `CREATE`, `ATTACH`, `PRAGMA`, transactions, `load_extension` and similar functions, and nested writes are refused.
+2. **Ephemeral container.** Allowed statements run in a new container with no network, no host mounts (host paths and the Docker socket are refused when building the `docker run` arguments), a read-only root, dropped capabilities, and resource caps. SQLite is opened `mode=ro&immutable=1`.
+3. **Time limit.** `QUERY_TIMEOUT_S` inside the worker plus a kill from the control plane.
+4. **Secrets stay out.** The inference key and database passwords live only in the control plane. The sandbox sees a SQLite copy.
+
+**The visible containment moment.** In a normal question the analyst emits `DROP TABLE`; the timeline shows it **Blocked** by the guard. The next step is Python in a fresh container that tries to read a host-only file, the inference key, and reach `1.1.1.1`; all fail and the container is removed. The **Containment drill** button (`POST /backend/containment`) re-runs the proof live and streams each check:
+
+- `DROP TABLE` never reaches the sandbox
+- `load_extension` is refused
+- An infinite loop is killed by the time limit
+- A host-only file cannot be read
+- A write does not appear on the host
+- Outbound network is closed
 
 ## What the judges should see
 
@@ -20,10 +58,11 @@ The Vultr VM is the control plane. It plans and dispatches. It does not run the 
 
 ```mermaid
 flowchart LR
-  Browser[Browser] --> Web[Next.js on the Vultr VM]
+  Browser[Browser] -->|HTTPS| Caddy[Caddy + Let's Encrypt]
+  Caddy --> Web[Next.js on the Vultr VM]
   Web --> API[FastAPI control plane]
   API --> Guard[Read-only SQL guard]
-  API --> LLM[Vultr Serverless Inference]
+  API --> LLM[Vultr Serverless Inference<br/>DeepSeek]
   Guard --> Run[Ephemeral sandbox container]
   Run --> Copy[(Session SQLite copy)]
   API --> Source[(Optional Vultr Managed Database)]
@@ -74,7 +113,7 @@ python3 -m venv .venv
 .venv/bin/pytest
 ```
 
-## What Brian does on Vultr
+## Self-host on Vultr
 
 The deployment target is already provisioned: **Ubuntu 24.04, 1 vCPU, 2 GB RAM, Docker 29 and Compose v5**. The running stack fits that machine. The image build does not, unless the VM has a little swap, because the Next.js compile spikes above 2 GB. Add the swap once, then build.
 
@@ -135,7 +174,25 @@ ufw allow 80/tcp
 ufw enable
 ```
 
-### 4. Optional: Vultr Managed Database
+### 4. HTTPS with Caddy
+
+`deploy/Caddyfile` plus the `caddy` service (Compose profile `https`) put Caddy on ports 80/443 with an automatic Let's Encrypt certificate. HTTP redirects to HTTPS. The proxy flushes immediately (`flush_interval -1`, no compression) so streamed answers arrive step by step, and accepts request bodies up to 26 MB for 25 MB uploads. With no domain, `<ip-with-dashes>.sslip.io` resolves to the VM.
+
+In `.env`:
+
+```bash
+WEB_PORT=127.0.0.1:43123
+FATHOM_DOMAIN=45-77-121-63.sslip.io
+```
+
+```bash
+ufw allow 443/tcp
+docker compose --profile https up -d --build
+curl -sI http://45-77-121-63.sslip.io/          # 308 to https
+curl -s https://45-77-121-63.sslip.io/backend/health
+```
+
+### 5. Optional: Vultr Managed Database
 
 Use this when you want the copilot on a real Postgres instead of only the bundled files. The sandbox still never sees the password.
 
@@ -158,7 +215,7 @@ postgresql://fathom_ro:choose-a-long-password@HOST:PORT/defaultdb?sslmode=requir
 
 The control plane sets `default_transaction_read_only`, copies tables (capped by `SNAPSHOT_ROW_CAP`, default 20,000 rows each), and seeds a volume. Later questions run against that copy. **Refresh** with resync is available on `POST /dashboards/{id}/refresh` with `{"resync": true}` when the session was opened from a connection string. The password stays in the control plane's session store on the VM disk. It is not returned by the API and it is not passed into the sandbox.
 
-### 5. Record and submit
+### 6. Record and submit
 
 Follow [DEMO.md](DEMO.md). Submit on lablab.ai with the public GitHub repo, the public URL, the video, and slides. The Vultr explanation is this README. Sharing on Vultr Community is optional and does not replace the lablab.ai submission.
 
@@ -175,7 +232,10 @@ Follow [DEMO.md](DEMO.md). Submit on lablab.ai with the public GitHub repo, the 
 | `QUERY_TIMEOUT_S` | Wall clock inside the worker, plus a kill from the control plane. |
 | `MAX_ROWS` | Rows returned to the analyst. Extra rows set a truncation warning. |
 | `SNAPSHOT_ROW_CAP` | Rows copied per table from an external database. |
-| `WEB_PORT` / `API_PORT` | Host ports. |
+| `WEB_PORT` / `API_PORT` | Host ports. Behind Caddy use `WEB_PORT=127.0.0.1:43123`. |
+| `FATHOM_DOMAIN` | Hostname Caddy serves and gets a certificate for (`https` profile). |
+| `WEB_UPSTREAM_PORT` | Loopback port Caddy proxies to (default `43123`). |
+| `SANDBOX_IMAGE` | Image for sandbox containers (`fathom-sandbox:local`). |
 
 ## Project layout
 
@@ -185,6 +245,7 @@ backend/app   Control plane: guard, agent loop, snapshots, API.
 backend/sandbox/worker.py
               The only program that runs in the sandbox image.
 docker-compose.yml
+deploy/Caddyfile  HTTPS front door.
 DEMO.md       The two-and-a-half minute script.
 ```
 
