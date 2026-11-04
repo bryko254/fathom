@@ -1,0 +1,60 @@
+services:
+  sandbox:
+    build:
+      context: ./backend/sandbox
+    image: fathom-sandbox:local
+    # Builds the image the control plane runs per task. This container itself
+    # does not answer queries; it exits so Compose knows the image exists.
+    entrypoint: ["python", "-c", "print('fathom sandbox image ready')"]
+    restart: "no"
+    read_only: true
+    cap_drop:
+      - ALL
+    mem_limit: 64m
+    pids_limit: 32
+    network_mode: none
+    user: "65534:65534"
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.vultrinference.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4.1-flash-1017}
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      SANDBOX_MODE: ${SANDBOX_MODE:-docker}
+      SANDBOX_IMAGE: fathom-sandbox:local
+      QUERY_TIMEOUT_S: ${QUERY_TIMEOUT_S:-8}
+      MAX_ROWS: ${MAX_ROWS:-500}
+      SANDBOX_MEMORY: ${SANDBOX_MEMORY:-128m}
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-0.5}
+      SNAPSHOT_ROW_CAP: ${SNAPSHOT_ROW_CAP:-20000}
+      DATA_DIR: /data
+    volumes:
+      - fathom-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${API_PORT:-43124}:8000"
+      - "${WEB_PORT:-43123}:3000"
+    depends_on:
+      sandbox:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+    # Share the API network namespace. Container-to-container bridge
+    # forwarding is unreliable on some Docker 29 hosts; localhost is not.
+    # The sandbox containers are still created separately, with no network.
+    network_mode: "service:api"
+    environment:
+      API_INTERNAL_URL: http://127.0.0.1:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  fathom-data:

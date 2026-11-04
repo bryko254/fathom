@@ -1,0 +1,12 @@
+node_modules/
+.next/
+__pycache__/
+**/__pycache__/
+.venv/
+.env
+data/
+*.pyc
+.pytest_cache/
+.DS_Store
+*.sqlite
+*.sqlite3
