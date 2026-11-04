@@ -211,6 +211,7 @@ def ask(session_id: str, body: AskIn) -> StreamingResponse:
                     result_payload = event["result"]
                     dashboard = result_payload.get("dashboard")
                     if dashboard and dashboard.get("widgets"):
+                        dashboard["widgets"] = _hydrate_metrics(session, dashboard["widgets"])
                         saved = store.create_dashboard(session_id, dashboard["title"], dashboard["widgets"])
                         result_payload["dashboard"] = saved
                         event["result"] = result_payload
@@ -314,6 +315,24 @@ def containment() -> StreamingResponse:
         yield _sse({"type": "done"})
 
     return _stream(generate())
+
+
+def _hydrate_metrics(session, widgets: list[dict]) -> list[dict]:
+    """Fill metric tiles the analyst did not already compute, using the same sandbox."""
+    runner = None
+    hydrated = []
+    for widget in widgets:
+        preview = dict(widget.get("preview") or {})
+        if widget.get("kind") == "metric" and preview.get("value") is None and widget.get("sql"):
+            runner = runner or _runner(session)
+            result = runner.run_sql(widget["sql"])
+            if result.ok and result.rows:
+                preview["value"] = next(iter(result.rows[0].values()))
+                preview["error"] = None
+            elif not result.ok:
+                preview["error"] = result.error
+        hydrated.append({**widget, "preview": preview})
+    return hydrated
 
 
 def _analyst(session):

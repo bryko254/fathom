@@ -40,6 +40,15 @@ export function DashboardView({
   );
 }
 
+function formatMetric(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "—";
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (Number.isNaN(numeric)) return String(value);
+  return Number.isInteger(numeric)
+    ? numeric.toLocaleString("en-US")
+    : numeric.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
 function WidgetCard({ widget }: { widget: Widget }) {
   const preview = widget.preview;
   const error = preview?.error;
@@ -50,7 +59,7 @@ function WidgetCard({ widget }: { widget: Widget }) {
       {widget.kind === "metric" ? (
         <p className="font-heading text-3xl">
           {widget.spec?.prefix ?? ""}
-          {preview?.value === undefined || preview?.value === null ? "—" : String(preview.value)}
+          {formatMetric(preview?.value)}
         </p>
       ) : null}
       {widget.kind === "chart" && widget.spec?.xKey && widget.spec.yKey ? (

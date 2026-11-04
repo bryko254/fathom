@@ -308,9 +308,22 @@ class MockAnalyst:
             "columns": detail.columns if detail and detail.ok else [],
             "rows": detail.rows if detail and detail.ok else [],
         }
+        reason_rows = reasons.rows if reasons and reasons.ok else []
+        account_count = int(totals["accounts"]) if totals else sum(int(row["accounts"]) for row in reason_rows)
+        mrr_lost = float(totals["mrrLost"]) if totals else sum(float(row["mrr_lost"]) for row in reason_rows)
         widgets = [
-            _metric("Accounts churned", f"SELECT COUNT(*) AS value FROM subscriptions WHERE status = 'canceled' AND ended_at >= '{start.isoformat()}' AND ended_at < '{end.isoformat()}'", prefix=""),
-            _metric("MRR lost", f"SELECT ROUND(SUM(mrr_cents)/100.0, 2) AS value FROM subscriptions WHERE status = 'canceled' AND ended_at >= '{start.isoformat()}' AND ended_at < '{end.isoformat()}'", prefix="$"),
+            _metric(
+                "Accounts churned",
+                f"SELECT COUNT(*) AS value FROM subscriptions WHERE status = 'canceled' AND ended_at >= '{start.isoformat()}' AND ended_at < '{end.isoformat()}'",
+                prefix="",
+                value=account_count,
+            ),
+            _metric(
+                "MRR lost",
+                f"SELECT ROUND(SUM(mrr_cents)/100.0, 2) AS value FROM subscriptions WHERE status = 'canceled' AND ended_at >= '{start.isoformat()}' AND ended_at < '{end.isoformat()}'",
+                prefix="$",
+                value=mrr_lost,
+            ),
             _chart_widget("Churn by reason", reasons_sql, "bar", "cancel_reason", "accounts", reasons),
             _chart_widget("Churn over time", monthly_sql, "line", "month", "accounts", monthly),
             _table_widget("Who left", detail_sql, detail),
@@ -406,29 +419,34 @@ class MockAnalyst:
             "columns": refunds.columns if refunds and refunds.ok else [],
             "rows": refunds.rows if refunds and refunds.ok else [],
         }
+        kpi_row = kpi.rows[0] if kpi and kpi.ok and kpi.rows else {}
         widgets = [
-            _metric("Paid revenue", f"SELECT ROUND(SUM(oi.quantity * oi.unit_price_cents)/100.0, 2) AS value FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.status = 'paid' AND o.ordered_at >= '{start.isoformat()}' AND o.ordered_at < '{end.isoformat()}'", prefix="$"),
-            _metric("Average order value", kpi_sql.replace("AS revenue,", "AS revenue,").split("AS orders,")[0] and kpi_sql, prefix="$"),
+            _metric(
+                "Paid revenue",
+                f"SELECT ROUND(SUM(oi.quantity * oi.unit_price_cents)/100.0, 2) AS value FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.status = 'paid' AND o.ordered_at >= '{start.isoformat()}' AND o.ordered_at < '{end.isoformat()}'",
+                prefix="$",
+                value=kpi_row.get("revenue"),
+            ),
+            _metric(
+                "Average order value",
+                f"""
+                SELECT ROUND(
+                  SUM(oi.quantity * oi.unit_price_cents) / 100.0
+                  / NULLIF(COUNT(DISTINCT o.id), 0), 2
+                ) AS value
+                FROM orders o
+                JOIN order_items oi ON oi.order_id = o.id
+                WHERE o.status = 'paid'
+                  AND o.ordered_at >= '{start.isoformat()}'
+                  AND o.ordered_at < '{end.isoformat()}'
+                """,
+                prefix="$",
+                value=kpi_row.get("avg_order_value"),
+            ),
             _chart_widget("Revenue by month", monthly_sql, "line", "month", "revenue", monthly),
             _chart_widget("Revenue by category", category_sql, "bar", "category", "revenue", categories),
             _table_widget("Refund rate", refund_sql, refunds),
         ]
-        # The AOV metric SQL above is sloppy if I botched the replace. Use kpi_sql's avg via a dedicated statement.
-        widgets[1] = _metric(
-            "Average order value",
-            f"""
-            SELECT ROUND(
-              SUM(oi.quantity * oi.unit_price_cents) / 100.0
-              / NULLIF(COUNT(DISTINCT o.id), 0), 2
-            ) AS value
-            FROM orders o
-            JOIN order_items oi ON oi.order_id = o.id
-            WHERE o.status = 'paid'
-              AND o.ordered_at >= '{start.isoformat()}'
-              AND o.ordered_at < '{end.isoformat()}'
-            """,
-            prefix="$",
-        )
         yield _result(answer, chart, table, f"Northline sales, {label}", widgets, self.queries)
 
     def _pesa(self) -> Iterator[dict]:
@@ -509,9 +527,21 @@ class MockAnalyst:
             "columns": reasons.columns if reasons and reasons.ok else [],
             "rows": reasons.rows if reasons and reasons.ok else [],
         }
+        county_rows = counties.rows if counties and counties.ok else []
+        failed_count = sum(int(row["failed_withdrawals"]) for row in county_rows)
         widgets = [
-            _metric("Failed withdrawals", f"SELECT COUNT(*) AS value FROM transactions WHERE txn_type = 'withdraw' AND status = 'failed' AND created_at >= '{start.isoformat()}' AND created_at < '{end.isoformat()}'", prefix=""),
-            _metric("Fee revenue (KES)", f"SELECT ROUND(SUM(fee_cents)/100.0, 2) AS value FROM transactions WHERE status = 'completed' AND created_at >= '{start.isoformat()}' AND created_at < '{end.isoformat()}'", prefix="KES "),
+            _metric(
+                "Failed withdrawals",
+                f"SELECT COUNT(*) AS value FROM transactions WHERE txn_type = 'withdraw' AND status = 'failed' AND created_at >= '{start.isoformat()}' AND created_at < '{end.isoformat()}'",
+                prefix="",
+                value=failed_count,
+            ),
+            _metric(
+                "Fee revenue (KES)",
+                f"SELECT ROUND(SUM(fee_cents)/100.0, 2) AS value FROM transactions WHERE status = 'completed' AND created_at >= '{start.isoformat()}' AND created_at < '{end.isoformat()}'",
+                prefix="KES ",
+                value=None if fee_result is None else fee_result.get("feeKes"),
+            ),
             _chart_widget("Failed withdrawals", county_sql, "bar", "county", "failed_withdrawals", counties),
             _chart_widget("Fees by type", fee_sql, "bar", "txn_type", "fee_kes", fees),
             _table_widget("Why withdrawals failed", reason_sql, reasons),
@@ -746,8 +776,9 @@ def _narrate_pesa(label: str, counties: list[dict], reasons: list[dict], fees: d
     )
 
 
-def _metric(title: str, sql: str, prefix: str) -> dict:
-    return {"title": title, "kind": "metric", "sql": _compact(sql), "spec": {"prefix": prefix}, "preview": {}}
+def _metric(title: str, sql: str, prefix: str, value=None) -> dict:
+    preview = {} if value is None else {"value": value}
+    return {"title": title, "kind": "metric", "sql": _compact(sql), "spec": {"prefix": prefix}, "preview": preview}
 
 
 def _chart_widget(title: str, sql: str, chart_type: str, x_key: str, y_key: str, result) -> dict:

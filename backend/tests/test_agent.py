@@ -59,6 +59,9 @@ def test_churn_question_self_corrects_and_builds_a_dashboard(tmp_path):
     assert result["chart"]["data"]
     assert result["chart"]["xKey"] == "cancel_reason"
     assert len(result["dashboard"]["widgets"]) >= 3
+    metrics = [widget for widget in result["dashboard"]["widgets"] if widget["kind"] == "metric"]
+    assert metrics[0]["preview"]["value"] == expected
+    assert metrics[1]["preview"]["value"] > 0
     assert any(step["kind"] == "python" and step["status"] == "ok" for step in steps)
 
 
