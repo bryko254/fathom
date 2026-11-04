@@ -12,7 +12,8 @@ import re
 from collections.abc import Iterator
 
 from app.config import Settings
-from app.mock_agent import DEMO_SAMPLE_IDS, MockAnalyst, _group_counts, _is_overview, _sid, _step
+from app.mock_agent import DEMO_SAMPLE_IDS, MockAnalyst, _group_counts, _is_overview, _narrate_overview, _sid, _step
+from app.sanitize import SCHEMA_PROMPT_LIMIT, cap_sample_payload, schema_for_prompt
 from app.sandbox import SandboxRunner
 from app.sanity import assess
 
@@ -65,10 +66,7 @@ class LlmAnalyst:
         if _is_overview(question):
             yield from self._overview(explorer, question)
             return
-        schema = [
-            {"table": name, "columns": info["columns"]}
-            for name, info in explorer.tables.items()
-        ]
+        schema = schema_for_prompt(explorer.tables)
         messages = [
             {"role": "system", "content": SYSTEM},
             {
@@ -103,7 +101,7 @@ class LlmAnalyst:
                 result_event, payload = self._run_sql(f"Sample {table}", f'SELECT * FROM "{table}" LIMIT 5', fixed=False)
                 yield result_event[0]
                 yield result_event[1]
-                messages.append({"role": "user", "content": json.dumps(payload)})
+                messages.append({"role": "user", "content": json.dumps(_bounded_payload(payload))})
             elif kind == "run_sql":
                 sql = str(action.get("sql") or "")
                 purpose = str(action.get("purpose") or "Run SQL")
@@ -111,7 +109,7 @@ class LlmAnalyst:
                 for event in events:
                     yield event
                 if payload.get("blocked"):
-                    messages.append({"role": "user", "content": json.dumps(payload)})
+                    messages.append({"role": "user", "content": json.dumps(_bounded_payload(payload))})
                     continue
                 if payload.get("needsConfirmation"):
                     yield {
@@ -122,7 +120,7 @@ class LlmAnalyst:
                     }
                     yield _finish_early("That statement changes data and was not run. Confirm it to execute this exact SQL once.")
                     return
-                messages.append({"role": "user", "content": json.dumps(payload)})
+                messages.append({"role": "user", "content": json.dumps(_bounded_payload(payload))})
             elif kind == "run_python":
                 code = str(action.get("code") or "")
                 purpose = str(action.get("purpose") or "Run Python")
@@ -270,39 +268,38 @@ class LlmAnalyst:
         rows = counted.rows if counted and counted.ok else []
         self.queries.extend(explorer.queries)
         grouped = _group_counts(rows)
+        fallback = _narrate_overview(question, rows, grouped)
+        answer = ""
         client = self.client or _openai_client(self.settings)
         if client is None:
-            yield {"type": "error", "error": "OpenAI client is not installed."}
-            return
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are Fathom. Write a plain-English overview of a database from sandbox row counts. "
-                    "Do not invent numbers. Group tables by the prefix before the first underscore. "
-                    "Say what the application appears to do. Reply with one JSON object and nothing else: "
-                    '{"action":"finish","answer":"..."}'
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps({"question": question, "counts": rows, "domains": grouped}),
-            },
-        ]
-        try:
-            action, _raw = _complete(client, self.settings.llm_model, messages)
-        except ValueError as exc:
-            messages.append({"role": "user", "content": "Reply with one JSON object: {\"action\":\"finish\",\"answer\":\"...\"}"})
+            answer = fallback
+        else:
+            prompt_rows = rows[:80]
+            prompt_domains = [{key: value for key, value in item.items() if key != "names"} | {"examples": item["names"][:6]} for item in grouped[:40]]
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Fathom. Write a plain-English overview of a database from sandbox row counts. "
+                        "Do not invent numbers. Group tables by the prefix before the first underscore. "
+                        "Say what the application appears to do. Reply with one JSON object and nothing else: "
+                        '{"action":"finish","answer":"..."}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps({"question": question, "counts": prompt_rows, "domains": prompt_domains})[:SCHEMA_PROMPT_LIMIT],
+                },
+            ]
             try:
                 action, _raw = _complete(client, self.settings.llm_model, messages)
-            except ValueError as again:
-                yield {"type": "error", "error": f"Vultr Serverless Inference did not return an answer: {again}"}
-                return
-        answer = str(action.get("answer") or "").strip()
+                answer = str(action.get("answer") or "").strip()
+            except Exception:
+                logger.exception("overview inference failed; using the row-count summary")
+                answer = ""
         if not answer:
-            yield {"type": "error", "error": "Vultr Serverless Inference returned no overview text."}
-            return
-        logger.info("answer provider=openai model=%s kind=overview", self.settings.llm_model)
+            answer = "The model did not return an overview, so this summary is from the row counts. " + fallback
+        logger.info("answer provider=openai model=%s kind=overview fallback=%s", self.settings.llm_model, answer.startswith("The model did not"))
         yield {
             "type": "result",
             "result": {
@@ -332,6 +329,17 @@ class LlmAnalyst:
                 "model": self.settings.llm_model,
             },
         }
+
+
+def _bounded_payload(payload: dict) -> dict:
+    body = dict(payload)
+    rows = body.get("rows")
+    if isinstance(rows, list):
+        kept = cap_sample_payload(rows)
+        body["rows"] = kept
+        if len(kept) < len(rows):
+            body["rowsOmitted"] = len(rows) - len(kept)
+    return body
 
 
 def _openai_client(settings: Settings):

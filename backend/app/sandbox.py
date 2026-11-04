@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.sanitize import sanitize_rows
 from app.sql_guard import GuardDecision, guard_sql
 
 HOST_MARKERS = ("/var/run/docker.sock", "/workspace", "/home", "bind", "type=bind")
@@ -303,7 +304,7 @@ class SandboxRunner:
                 timed_out=bool(payload.get("timeout")),
                 container_name=payload.get("container"),
             )
-        rows = payload.get("rows") or []
+        rows = sanitize_rows(payload.get("rows") or [])
         return ExecResult(
             ok=True,
             columns=list(payload.get("columns") or []),
@@ -318,6 +319,12 @@ class SandboxRunner:
 
 
 def _parse_output(stdout: bytes, stderr: bytes, container: str | None = None) -> dict:
+    if len(stdout) > 2_000_000:
+        return {
+            "ok": False,
+            "error": "sandbox result was larger than 2 MB and was discarded",
+            "container": container,
+        }
     text = stdout.decode("utf-8", "replace").strip()
     for line in reversed(text.splitlines()):
         line = line.strip()

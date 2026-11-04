@@ -26,6 +26,16 @@ from app.store import Store
 
 logger = logging.getLogger("fathom")
 settings: Settings = load_settings()
+
+
+def configure_logging() -> None:
+    """Uvicorn's default level hides app INFO records. Show them in docker logs."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    for name in ("fathom", "fathom.inference"):
+        logging.getLogger(name).setLevel(logging.INFO)
+
+
+configure_logging()
 store = Store(settings.data_dir / "app.sqlite")
 samples: dict[str, Path] = {}
 locks: dict[str, threading.Lock] = {}
@@ -248,7 +258,26 @@ def ask(session_id: str, body: AskIn) -> StreamingResponse:
                 store.add_message(session_id, "assistant", result_payload.get("answer") or "", {"steps": _final_steps(steps), "result": result_payload})
             yield _sse({"type": "done"})
         except Exception as exc:  # noqa: BLE001
-            yield _sse({"type": "error", "error": str(exc)})
+            logger.exception("ask failed")
+            message = str(exc) or exc.__class__.__name__
+            try:
+                yield _sse({"type": "error", "error": message})
+                yield _sse(
+                    {
+                        "type": "step",
+                        "step": {
+                            "id": "crash",
+                            "kind": "error",
+                            "title": "Analysis stopped",
+                            "status": "error",
+                            "detail": message,
+                            "error": message,
+                        },
+                    }
+                )
+                yield _sse({"type": "done"})
+            except Exception:
+                logger.exception("failed to report the ask error to the client")
         finally:
             lock.release()
 

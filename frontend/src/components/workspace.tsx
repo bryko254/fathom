@@ -102,15 +102,35 @@ export function Workspace() {
       setError(null);
       setActiveDashboard(null);
       setPane("work");
+      let finished = false;
       try {
         await streamPost(`/backend/sessions/${sessionId}/ask`, { question: trimmed }, (event) => {
+          if (event.type === "result" || event.type === "error") finished = true;
           applyEvent(assistantId, event, setMessages, setDashboards);
           if (event.type === "result" && window.matchMedia("(max-width: 1023px)").matches) {
             setPane("answer");
           }
         });
+        if (!finished) {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId && !message.result
+                ? { ...message, content: "The analysis stopped unexpectedly." }
+                : message,
+            ),
+          );
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "The question failed.");
+        if (!finished) {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId && !message.result
+                ? { ...message, content: "The analysis stopped unexpectedly." }
+                : message,
+            ),
+          );
+        }
       } finally {
         setRunning(false);
       }
@@ -466,6 +486,11 @@ function Conversation({
               ) : (
                 <div>
                   {message.steps && message.steps.length > 0 ? <Trace steps={message.steps} /> : null}
+                  {message.content && !message.result ? (
+                    <p className="mt-3 text-sm text-destructive" role="alert">
+                      {message.content}
+                    </p>
+                  ) : null}
                   {message.confirmation ? (
                     <div className="mt-3 rounded-xl bg-card p-3 ring-1 ring-foreground/10">
                       <p className="text-sm">{message.confirmation.reason}</p>
@@ -474,9 +499,6 @@ function Conversation({
                         Run this statement once
                       </Button>
                     </div>
-                  ) : null}
-                  {!message.steps?.length && message.content ? (
-                    <p className="text-sm text-muted-foreground">{message.content}</p>
                   ) : null}
                 </div>
               )}

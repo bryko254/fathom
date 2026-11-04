@@ -782,8 +782,11 @@ def _is_overview(question: str) -> bool:
         "what data",
         "what's on the db",
         "what is on the db",
+        "thisdb",
     )
-    return any(phrase in q for phrase in phrases)
+    if any(phrase in q for phrase in phrases):
+        return True
+    return "about" in q and any(word in q for word in ("db", "database", "schema", "data"))
 
 
 def _group_counts(rows: list[dict]) -> list[dict]:

@@ -62,6 +62,19 @@ def _alarm(signum, frame):  # noqa: ARG001
     raise TimeoutError("sandbox time limit exceeded")
 
 
+def _cell(value):
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return None if value != value or value in (float("inf"), float("-inf")) else value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"<blob {len(value)} bytes>"
+    text = str(value)
+    if len(text) > 200:
+        return text[:200] + "…"
+    return text
+
+
 def emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj, default=str))
     sys.stdout.write("\n")
@@ -119,10 +132,7 @@ def op_sql(job: dict) -> dict:
         for row in fetched[:max_rows]:
             item = {}
             for key in row.keys():
-                value = row[key]
-                if isinstance(value, bytes):
-                    value = value.decode("utf-8", "replace")
-                item[key] = value
+                item[key] = _cell(row[key])
             rows.append(item)
         return {
             "ok": True,
