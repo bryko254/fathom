@@ -20,6 +20,7 @@ from app.mock_agent import MockAnalyst
 from app.samples import CATALOG, ensure_samples
 from app.sandbox import SandboxRunner
 from app.snapshot import snapshot_connection
+from app.sql_import import SqlImportError, load_sql_dump
 from app.store import Store
 
 settings: Settings = load_settings()
@@ -142,10 +143,14 @@ async def upload_session(file: UploadFile = File(...), name: str | None = None) 
     filename = (file.filename or "upload").lower()
     try:
         if filename.endswith((".sql", ".txt")):
-            _import_sql(raw.decode("utf-8", "replace"), dest)
+            load_sql_dump(raw.decode("utf-8", "replace"), dest)
         else:
             dest.write_bytes(raw)
             _assert_sqlite(dest)
+    except SqlImportError as exc:
+        if dest.exists():
+            dest.unlink()
+        raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         if dest.exists():
             dest.unlink()
@@ -388,24 +393,6 @@ def _assert_sqlite(path: Path) -> None:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         conn.execute("SELECT name FROM sqlite_master LIMIT 1")
-    finally:
-        conn.close()
-
-
-def _import_sql(script: str, dest: Path) -> None:
-    if "load_extension" in script.lower():
-        raise ValueError("load_extension is not allowed in an upload")
-    conn = sqlite3.connect(dest)
-
-    def authorizer(action, arg1, arg2, db_name, source):  # noqa: ARG001
-        if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH, sqlite3.SQLITE_PRAGMA):
-            return sqlite3.SQLITE_DENY
-        return sqlite3.SQLITE_OK
-
-    conn.set_authorizer(authorizer)
-    try:
-        conn.executescript(script)
-        conn.commit()
     finally:
         conn.close()
 

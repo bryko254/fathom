@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -58,6 +58,7 @@ export function Workspace() {
   const [drillOpen, setDrillOpen] = useState(false);
   const [drillChecks, setDrillChecks] = useState<DrillCheck[]>([]);
   const [drilling, setDrilling] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,19 +133,27 @@ export function Workspace() {
 
   async function onUpload(file: File | undefined) {
     if (!file) return;
+    if (file.size > 25 * 1024 * 1024) {
+      setError("That file is over 25 MB. Upload a .sql, .sqlite, or .db file up to 25 MB.");
+      return;
+    }
     setError(null);
+    setUploading(true);
     try {
       const next = await uploadSession(file);
       setSession(next);
       setMessages([]);
       setActiveDashboard(null);
       setQuestion("");
+      setPane("work");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setUploading(false);
     }
   }
 
-  async function onConnect(event: React.FormEvent) {
+  async function onConnect(event: FormEvent) {
     event.preventDefault();
     setError(null);
     try {
@@ -280,9 +289,18 @@ export function Workspace() {
       </div>
 
       <div className="grid min-h-0 flex-1 gap-4 px-4 py-4 lg:h-[calc(100vh-4.75rem)] lg:grid-cols-[280px_minmax(0,1fr)_360px] lg:px-6">
-        <aside className={`${pane === "sources" ? "flex" : "hidden"} min-h-0 flex-col gap-4 lg:flex`}>
+        <aside className={`${pane === "sources" ? "flex" : "hidden"} min-h-0 flex-col gap-4 overflow-auto lg:flex`}>
+          <BringData
+            idPrefix="side"
+            compact
+            connection={connection}
+            uploading={uploading}
+            onConnection={setConnection}
+            onConnect={onConnect}
+            onUpload={onUpload}
+          />
           <section>
-            <h2 className="text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase">Sample ledgers</h2>
+            <h2 className="text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase">Demo datasets</h2>
             <div className="mt-2 space-y-2">
               {samples.map((sample) => (
                 <button
@@ -297,34 +315,6 @@ export function Workspace() {
               ))}
               {samples.length === 0 && !bootError ? <p className="text-sm text-muted-foreground">Loading ledgers…</p> : null}
             </div>
-          </section>
-          <section className="space-y-2">
-            <h2 className="text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase">Bring a database</h2>
-            <Label htmlFor="sqlite-file" className="text-xs text-muted-foreground">
-              SQLite file or SQL dump
-            </Label>
-            <Input
-              id="sqlite-file"
-              type="file"
-              accept=".sqlite,.db,.sqlite3,.sql,.txt"
-              onChange={(event) => onUpload(event.target.files?.[0])}
-            />
-            <form onSubmit={onConnect} className="space-y-2">
-              <Label htmlFor="connection" className="text-xs text-muted-foreground">
-                Postgres, MySQL, or SQLite URL
-              </Label>
-              <Input
-                id="connection"
-                type="password"
-                autoComplete="off"
-                placeholder="postgresql://readonly:…@host:5432/db?sslmode=require"
-                value={connection}
-                onChange={(event) => setConnection(event.target.value)}
-              />
-              <Button type="submit" variant="secondary" size="sm" disabled={!connection.trim()}>
-                Snapshot into the sandbox
-              </Button>
-            </form>
           </section>
           <section>
             <h2 className="text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase">Dashboards</h2>
@@ -361,10 +351,15 @@ export function Workspace() {
               question={question}
               suggested={suggested}
               running={running}
+              uploading={uploading}
+              connection={connection}
               onQuestion={setQuestion}
+              onConnection={setConnection}
               onAsk={() => session && ask(question, session.id)}
               onOpenSample={openSample}
               onConfirm={onConfirm}
+              onConnect={onConnect}
+              onUpload={onUpload}
             />
           )}
         </main>
@@ -409,10 +404,15 @@ function Conversation({
   question,
   suggested,
   running,
+  uploading,
+  connection,
   onQuestion,
+  onConnection,
   onAsk,
   onOpenSample,
   onConfirm,
+  onConnect,
+  onUpload,
 }: {
   session: Session | null;
   samples: Sample[];
@@ -420,36 +420,63 @@ function Conversation({
   question: string;
   suggested?: string;
   running: boolean;
+  uploading: boolean;
+  connection: string;
   onQuestion: (value: string) => void;
+  onConnection: (value: string) => void;
   onAsk: () => void;
   onOpenSample: (sample: Sample, andAsk: boolean) => void;
   onConfirm: (confirmation: Confirmation) => void;
+  onConnect: (event: FormEvent) => void;
+  onUpload: (file: File | undefined) => void;
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 space-y-4 overflow-auto pb-4">
         {messages.length === 0 ? (
-          <div className="mx-auto max-w-xl py-8">
-            <p className="text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase">Ask the ledger</p>
-            <h1 className="mt-2 font-heading text-4xl leading-tight">Watch it explore, miss, and correct itself.</h1>
-            <p className="mt-3 text-sm leading-6 text-muted-foreground">
-              Fathom reads the schema, writes SQL, runs it in an isolated sandbox, and throws the result away when the
-              numbers do not make sense. The answer quotes the query that survived.
-            </p>
-            <div className="mt-6 space-y-2">
-              {samples.map((sample) => (
-                <button
-                  key={sample.id}
-                  type="button"
-                  className="block w-full rounded-xl bg-card px-4 py-3 text-left ring-1 ring-foreground/10 hover:ring-primary"
-                  onClick={() => onOpenSample(sample, true)}
-                >
-                  <span className="text-xs text-muted-foreground">{sample.name}</span>
-                  <span className="mt-1 block text-sm">{sample.question}</span>
-                </button>
-              ))}
+          session ? (
+            <div className="mx-auto max-w-xl py-10">
+              <p className="text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase">Ledger ready</p>
+              <h1 className="mt-2 font-heading text-4xl leading-tight">{session.title}</h1>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                Ask a question below. Fathom reads the schema in the sandbox, shows the SQL, and corrects itself when a
+                query fails.
+              </p>
             </div>
-          </div>
+          ) : (
+            <div className="mx-auto flex max-w-3xl flex-col items-center py-6 text-center sm:py-10">
+              <p className="text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase">Your database</p>
+              <h1 className="mt-2 font-heading text-4xl leading-tight sm:text-5xl">Bring the data. Ask in English.</h1>
+              <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">
+                Upload a dump or point at Postgres or MySQL. Fathom snapshots it into a read-only sandbox, then explores
+                the schema itself.
+              </p>
+              <BringData
+                idPrefix="hero"
+                connection={connection}
+                uploading={uploading}
+                onConnection={onConnection}
+                onConnect={onConnect}
+                onUpload={onUpload}
+              />
+              <div className="mt-8 w-full">
+                <h2 className="text-sm font-medium text-muted-foreground">No database handy? Try a demo dataset</h2>
+                <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  {samples.map((sample) => (
+                    <button
+                      key={sample.id}
+                      type="button"
+                      className="rounded-xl bg-card px-3 py-3 text-left ring-1 ring-foreground/10 hover:ring-primary"
+                      onClick={() => onOpenSample(sample, true)}
+                    >
+                      <span className="block text-sm font-medium">{sample.name}</span>
+                      <span className="mt-1 block text-xs leading-5 text-muted-foreground">{sample.question}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )
         ) : (
           messages.map((message) => (
             <article key={message.id}>
@@ -577,6 +604,94 @@ function AnswerPanel({
           Open dashboard
         </Button>
       ) : null}
+    </div>
+  );
+}
+
+function BringData({
+  idPrefix,
+  compact = false,
+  connection,
+  uploading,
+  onConnection,
+  onConnect,
+  onUpload,
+}: {
+  idPrefix: string;
+  compact?: boolean;
+  connection: string;
+  uploading: boolean;
+  onConnection: (value: string) => void;
+  onConnect: (event: FormEvent) => void;
+  onUpload: (file: File | undefined) => void;
+}) {
+  const [over, setOver] = useState(false);
+  return (
+    <div className={compact ? "space-y-3" : "mt-6 grid w-full gap-3 text-left sm:grid-cols-2"}>
+      <form
+        className={
+          compact
+            ? "space-y-2"
+            : `flex min-h-44 flex-col justify-between rounded-2xl bg-card p-4 ring-1 ${over ? "ring-primary" : "ring-foreground/10"}`
+        }
+        onDragOver={(event) => {
+          event.preventDefault();
+          setOver(true);
+        }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(event) => {
+          event.preventDefault();
+          setOver(false);
+          onUpload(event.dataTransfer.files?.[0]);
+        }}
+        onSubmit={(event) => event.preventDefault()}
+      >
+        <div>
+          <h2 className={compact ? "text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase" : "font-heading text-2xl"}>
+            Upload
+          </h2>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            .sql, .sqlite, or .db. 25 MB maximum. MySQL and Postgres dumps are translated into the sandbox.
+          </p>
+        </div>
+        <Label htmlFor={`${idPrefix}-file`} className="mt-3 cursor-pointer">
+          <span className="inline-flex rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground">
+            {uploading ? "Reading the file…" : over ? "Drop to upload" : "Choose a file"}
+          </span>
+          <Input
+            id={`${idPrefix}-file`}
+            className="sr-only"
+            type="file"
+            accept=".sql,.sqlite,.db,.sqlite3"
+            disabled={uploading}
+            onChange={(event) => {
+              onUpload(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
+        </Label>
+      </form>
+      <form className={compact ? "space-y-2" : "flex min-h-44 flex-col justify-between rounded-2xl bg-card p-4 text-left ring-1 ring-foreground/10"} onSubmit={onConnect}>
+        <div className="space-y-2">
+          <h2 className={compact ? "text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase" : "font-heading text-2xl"}>
+            Connect a database
+          </h2>
+          <Label htmlFor={`${idPrefix}-connection`} className="text-xs text-muted-foreground">
+            Postgres or MySQL connection string. Fathom takes a read-only snapshot. The password stays on the server.
+          </Label>
+          <Input
+            id={`${idPrefix}-connection`}
+            type="password"
+            autoComplete="off"
+            placeholder="postgresql://readonly:…@host:5432/db?sslmode=require"
+            value={connection}
+            onChange={(event) => onConnection(event.target.value)}
+          />
+        </div>
+        <Button type="submit" className="mt-3" disabled={!connection.trim() || uploading}>
+          Snapshot into the sandbox
+        </Button>
+      </form>
     </div>
   );
 }
