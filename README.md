@@ -4,7 +4,7 @@
 
 **Live:** https://45-77-121-63.sslip.io · **Repo:** https://github.com/bryko254/fathom
 
-Fathom is an autonomous database copilot. You connect a SQL database, upload a SQLite file or a dump (up to 25 MB), or open a bundled ledger. You ask in plain English. The agent explores the schema, writes SQL, runs it in a disposable sandbox, checks the result, and fixes the query when the sandbox says it is wrong. The answer is a table, a chart, a short explanation, and a dashboard you can refresh.
+Fathom is an autonomous database copilot. You upload a .sql dump or a .sqlite/.db file (up to 25 MB), or open a bundled ledger. You ask in plain English. The agent explores the schema, writes SQL, runs it in a disposable sandbox, checks the result, and fixes the query when the sandbox says it is wrong. The answer is a table, a chart, a short explanation, and a dashboard you can refresh.
 
 It is built for the [Vultr Agent Rush hackathon](https://lablab.ai/ai-hackathons/vultr-hackathon), Challenge 1 (Blast Radius Zero): a web agent that does real work inside a sandbox on Vultr, with the model on Vultr Serverless Inference.
 
@@ -207,7 +207,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO fathom_ro;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO fathom_ro;
 ```
 
-3. In the Fathom UI, paste a URL of this shape and choose **Snapshot into the sandbox**:
+3. The UI for this build only offers file upload. The backend still accepts a connection string via `POST /sessions` with `{"source": "connection", "connectionString": "..."}`, using a URL of this shape:
 
 ```text
 postgresql://fathom_ro:choose-a-long-password@HOST:PORT/defaultdb?sslmode=require

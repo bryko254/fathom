@@ -1,7 +1,7 @@
 "use client";
 
 import { newId } from "@/lib/utils";
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,7 +18,6 @@ import { DashboardView } from "@/components/dashboard-view";
 import { Trace } from "@/components/trace";
 import { ThinkingDots, Typewriter } from "@/components/typewriter";
 import {
-  createConnectionSession,
   createSampleSession,
   executeSql,
   getDashboard,
@@ -56,7 +55,6 @@ export function Workspace() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pane, setPane] = useState<Pane>("work");
-  const [connection, setConnection] = useState("");
   const [drillOpen, setDrillOpen] = useState(false);
   const [drillChecks, setDrillChecks] = useState<DrillCheck[]>([]);
   const [drilling, setDrilling] = useState(false);
@@ -172,20 +170,6 @@ export function Workspace() {
       setError(err instanceof Error ? err.message : "Upload failed.");
     } finally {
       setUploading(false);
-    }
-  }
-
-  async function onConnect(event: FormEvent) {
-    event.preventDefault();
-    setError(null);
-    try {
-      const next = await createConnectionSession(connection, "Connected database");
-      setSession(next);
-      setMessages([]);
-      setConnection("");
-      setActiveDashboard(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not snapshot that database.");
     }
   }
 
@@ -315,10 +299,7 @@ export function Workspace() {
           <BringData
             idPrefix="side"
             compact
-            connection={connection}
             uploading={uploading}
-            onConnection={setConnection}
-            onConnect={onConnect}
             onUpload={onUpload}
           />
           <section>
@@ -373,12 +354,9 @@ export function Workspace() {
               suggested={suggested}
               running={running}
               uploading={uploading}
-              connection={connection}
               onQuestion={setQuestion}
-              onConnection={setConnection}
               onAsk={() => session && ask(question, session.id)}
               onConfirm={onConfirm}
-              onConnect={onConnect}
               onUpload={onUpload}
             />
           )}
@@ -424,12 +402,9 @@ function Conversation({
   suggested,
   running,
   uploading,
-  connection,
   onQuestion,
-  onConnection,
   onAsk,
   onConfirm,
-  onConnect,
   onUpload,
 }: {
   session: Session | null;
@@ -438,12 +413,9 @@ function Conversation({
   suggested?: string;
   running: boolean;
   uploading: boolean;
-  connection: string;
   onQuestion: (value: string) => void;
-  onConnection: (value: string) => void;
   onAsk: () => void;
   onConfirm: (confirmation: Confirmation) => void;
-  onConnect: (event: FormEvent) => void;
   onUpload: (file: File | undefined) => void;
 }) {
   return (
@@ -469,10 +441,7 @@ function Conversation({
               </p>
               <BringData
                 idPrefix="hero"
-                connection={connection}
                 uploading={uploading}
-                onConnection={onConnection}
-                onConnect={onConnect}
                 onUpload={onUpload}
               />
             </div>
@@ -646,28 +615,22 @@ function AnswerResult({
 function BringData({
   idPrefix,
   compact = false,
-  connection,
   uploading,
-  onConnection,
-  onConnect,
   onUpload,
 }: {
   idPrefix: string;
   compact?: boolean;
-  connection: string;
   uploading: boolean;
-  onConnection: (value: string) => void;
-  onConnect: (event: FormEvent) => void;
   onUpload: (file: File | undefined) => void;
 }) {
   const [over, setOver] = useState(false);
   return (
-    <div className={compact ? "space-y-3" : "mt-6 grid w-full gap-3 text-left sm:grid-cols-2"}>
+    <div className={compact ? "space-y-3" : "mx-auto mt-6 w-full max-w-md text-center"}>
       <form
         className={
           compact
             ? "space-y-2"
-            : `flex min-h-44 flex-col justify-between rounded-2xl bg-card p-4 ring-1 ${over ? "ring-primary" : "ring-foreground/10"}`
+            : `flex min-h-44 flex-col items-center justify-between rounded-2xl bg-card p-4 ring-1 ${over ? "ring-primary" : "ring-foreground/10"}`
         }
         onDragOver={(event) => {
           event.preventDefault();
@@ -705,27 +668,6 @@ function BringData({
             }}
           />
         </Label>
-      </form>
-      <form className={compact ? "space-y-2" : "flex min-h-44 flex-col justify-between rounded-2xl bg-card p-4 text-left ring-1 ring-foreground/10"} onSubmit={onConnect}>
-        <div className="space-y-2">
-          <h2 className={compact ? "text-[11px] font-medium tracking-[0.16em] text-muted-foreground uppercase" : "font-heading text-2xl"}>
-            Connect a database
-          </h2>
-          <Label htmlFor={`${idPrefix}-connection`} className="text-xs text-muted-foreground">
-            Postgres or MySQL connection string. Fathom takes a read-only snapshot. The password stays on the server.
-          </Label>
-          <Input
-            id={`${idPrefix}-connection`}
-            type="password"
-            autoComplete="off"
-            placeholder="postgresql://readonly:…@host:5432/db?sslmode=require"
-            value={connection}
-            onChange={(event) => onConnection(event.target.value)}
-          />
-        </div>
-        <Button type="submit" className="mt-3" disabled={!connection.trim() || uploading}>
-          Snapshot into the sandbox
-        </Button>
       </form>
     </div>
   );
