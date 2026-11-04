@@ -88,6 +88,13 @@ class LlmAnalyst:
         for _ in range(8):
             try:
                 action, raw = _complete(client, self.settings.llm_model, messages)
+            except ValueError as exc:
+                logger.warning("model reply unusable after retry: %s", exc)
+                yield _finish_early(
+                    "The model's reply could not be read as a plan, even after a retry. "
+                    "Please ask again, or rephrase the question a little more specifically."
+                )
+                return
             except Exception as exc:  # noqa: BLE001
                 yield {"type": "error", "error": f"Inference call failed: {exc}"}
                 return
@@ -378,7 +385,13 @@ def _complete(client, model: str, messages: list[dict]) -> tuple[dict, str]:
         response, text = _invoke(client, model, messages, MAX_TOKENS * 2)
     if not text:
         raise ValueError(f"The model returned no text (finish_reason={response.choices[0].finish_reason}).")
-    return _parse_action(text), text
+    try:
+        return _parse_action(text), text
+    except ValueError:
+        logger.info("unparseable model reply; retrying with a stricter prompt")
+    retry = messages + [{"role": "assistant", "content": text[:4000]}, {"role": "user", "content": STRICT_RETRY}]
+    _, text2 = _invoke(client, model, retry, MAX_TOKENS)
+    return _parse_action(text2 or ""), text2
 
 
 def _invoke(client, model: str, messages: list[dict], max_tokens: int):
@@ -400,15 +413,45 @@ def _invoke(client, model: str, messages: list[dict], max_tokens: int):
 
 
 def _parse_action(raw: str) -> dict:
-    text = raw.strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
-    if fenced:
-        text = fenced.group(1)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end < start:
+    """Pull the first usable action object out of loosely formatted model text."""
+    text = (raw or "").strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I).strip()
+    text = re.sub(r"```(?:json)?", "", text, flags=re.I)
+    decoder = json.JSONDecoder()
+    objects: list[dict] = []
+    i = 0
+    while True:
+        i = text.find("{", i)
+        if i < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        if isinstance(obj, dict):
+            objects.append(obj)
+        i = end
+    if not objects:
         raise ValueError("The model did not return JSON.")
-    return json.loads(text[start : end + 1])
+    with_action = [o for o in objects if o.get("action")]
+    for o in with_action:
+        if o.get("action") == "run_sql" and o.get("sql"):
+            return o
+    if with_action:
+        return with_action[0]
+    merged: dict = {}
+    for o in objects:
+        merged.update(o)
+    if "action" not in merged and merged.get("sql"):
+        merged["action"] = "run_sql"
+    return merged
+
+
+STRICT_RETRY = (
+    "Your last reply could not be parsed. Reply with exactly ONE JSON object and nothing else: "
+    "no prose, no code fences, no second object."
+)
 
 
 def _finish_early(answer: str) -> dict:

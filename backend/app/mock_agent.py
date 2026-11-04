@@ -9,6 +9,8 @@ multiplies rows). The next statement is written because the sandbox said so.
 
 from __future__ import annotations
 
+import re
+
 import sqlite3
 import uuid
 from collections.abc import Iterator
@@ -178,6 +180,28 @@ class MockAnalyst:
             elapsedMs=probed.elapsed_ms,
         )
 
+    def _pragma_columns(self) -> dict[str, list[str]]:
+        """Read real column names from the database via pragma_table_info (paged)."""
+        out: dict[str, list[str]] = {}
+        page = 400
+        for offset in range(0, 20000, page):
+            try:
+                res = self.runner.run_sql(
+                    "SELECT m.name AS tbl, p.name AS col FROM sqlite_master AS m "
+                    "JOIN pragma_table_info(m.name) AS p "
+                    "WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' "
+                    f"ORDER BY m.name, p.cid LIMIT {page} OFFSET {offset}"
+                )
+            except Exception:  # noqa: BLE001
+                break
+            if not res.ok:
+                break
+            for r in res.rows:
+                out.setdefault(r["tbl"], []).append(r["col"])
+            if len(res.rows) < page:
+                break
+        return out
+
     def _explore(self) -> Iterator[dict]:
         step_id = _sid()
         yield _step(step_id, "explore", "Explore the schema", "running", detail="Reading sqlite_master.")
@@ -190,13 +214,17 @@ class MockAnalyst:
         import sqlglot
         from sqlglot import exp
 
+        live = self._pragma_columns()
         for row in result.rows:
-            columns: list[str] = []
-            try:
-                tree = sqlglot.parse_one(row["sql"], read="sqlite")
-                columns = [node.name for node in tree.find_all(exp.ColumnDef)]
-            except Exception:
-                columns = []
+            columns: list[str] = list(live.get(row["name"], []))
+            if not columns:
+                try:
+                    tree = sqlglot.parse_one(row["sql"], read="sqlite")
+                    columns = [node.name for node in tree.find_all(exp.ColumnDef)]
+                except Exception:
+                    columns = []
+            if not columns:
+                columns = parse_create_columns(row["sql"] or "")
             self.tables[row["name"]] = {"sql": row["sql"], "columns": columns}
         shown = list(self.tables)
         preview = ", ".join(shown[:12])
@@ -992,3 +1020,65 @@ def schema_overview(db_path: str) -> list[dict]:
         return [{"name": row[0], "sql": row[1]} for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table'")]
     finally:
         conn.close()
+
+
+_CONSTRAINT_WORDS = {"constraint", "primary", "foreign", "unique", "check", "key", "index", "fulltext", "spatial"}
+
+
+def _split_top_level(body: str) -> list[str]:
+    parts, depth, buf, quote = [], 0, [], None
+    for ch in body:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'`[":
+            quote = "]" if ch == "[" else ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(buf)); buf = []; continue
+        buf.append(ch)
+    if "".join(buf).strip():
+        parts.append("".join(buf))
+    return parts
+
+
+def parse_create_columns(sql: str) -> list[str]:
+    """Tolerant column extraction from a CREATE TABLE statement."""
+    start = sql.find("(")
+    if start < 0:
+        return []
+    depth, end, quote = 0, -1, None
+    for i in range(start, len(sql)):
+        ch = sql[i]
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'`[":
+            quote = "]" if ch == "[" else ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    body = sql[start + 1 : end if end > 0 else len(sql)]
+    cols: list[str] = []
+    for part in _split_top_level(body):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r'"((?:[^"]|"")+)"|`((?:[^`]|``)+)`|\[([^\]]+)\]|([A-Za-z_][\w$]*)', part)
+        if not m:
+            continue
+        if m.group(4) and m.group(4).lower() in _CONSTRAINT_WORDS:
+            continue
+        name = m.group(1) or m.group(2) or m.group(3) or m.group(4)
+        cols.append(name.replace('""', '"').replace("``", "`"))
+    return cols
