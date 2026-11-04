@@ -346,7 +346,6 @@ export function Workspace() {
           ) : (
             <Conversation
               session={session}
-              samples={samples}
               messages={messages}
               question={question}
               suggested={suggested}
@@ -356,7 +355,6 @@ export function Workspace() {
               onQuestion={setQuestion}
               onConnection={setConnection}
               onAsk={() => session && ask(question, session.id)}
-              onOpenSample={openSample}
               onConfirm={onConfirm}
               onConnect={onConnect}
               onUpload={onUpload}
@@ -399,7 +397,6 @@ export function Workspace() {
 
 function Conversation({
   session,
-  samples,
   messages,
   question,
   suggested,
@@ -409,13 +406,11 @@ function Conversation({
   onQuestion,
   onConnection,
   onAsk,
-  onOpenSample,
   onConfirm,
   onConnect,
   onUpload,
 }: {
   session: Session | null;
-  samples: Sample[];
   messages: ChatMessage[];
   question: string;
   suggested?: string;
@@ -425,7 +420,6 @@ function Conversation({
   onQuestion: (value: string) => void;
   onConnection: (value: string) => void;
   onAsk: () => void;
-  onOpenSample: (sample: Sample, andAsk: boolean) => void;
   onConfirm: (confirmation: Confirmation) => void;
   onConnect: (event: FormEvent) => void;
   onUpload: (file: File | undefined) => void;
@@ -459,22 +453,6 @@ function Conversation({
                 onConnect={onConnect}
                 onUpload={onUpload}
               />
-              <div className="mt-8 w-full">
-                <h2 className="text-sm font-medium text-muted-foreground">No database handy? Try a demo dataset</h2>
-                <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                  {samples.map((sample) => (
-                    <button
-                      key={sample.id}
-                      type="button"
-                      className="rounded-xl bg-card px-3 py-3 text-left ring-1 ring-foreground/10 hover:ring-primary"
-                      onClick={() => onOpenSample(sample, true)}
-                    >
-                      <span className="block text-sm font-medium">{sample.name}</span>
-                      <span className="mt-1 block text-xs leading-5 text-muted-foreground">{sample.question}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
             </div>
           )
         ) : (
