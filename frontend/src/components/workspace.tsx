@@ -16,6 +16,7 @@ import {
 import { ChartView, DataTable } from "@/components/chart-view";
 import { DashboardView } from "@/components/dashboard-view";
 import { Trace } from "@/components/trace";
+import { ThinkingDots, Typewriter } from "@/components/typewriter";
 import {
   createConnectionSession,
   createSampleSession,
@@ -559,20 +560,51 @@ function AnswerPanel({
     return (
       <div className="rounded-xl bg-card p-4 ring-1 ring-foreground/10">
         <h2 className="font-heading text-xl">Answer</h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          {running
-            ? "The sandbox is still working. The trace on the left is the live record."
-            : "Tables, the chart, and the SQL that passed the sanity check land here."}
+        <p className="mt-2 text-sm text-muted-foreground" aria-live="polite">
+          {running ? (
+            <>
+              <ThinkingDots />
+              <Typewriter
+                key="running"
+                keepCaret
+                text="The sandbox is still working. The trace on the left is the live record."
+                msPerChar={22}
+              />
+            </>
+          ) : (
+            <Typewriter
+              key="idle"
+              keepCaret
+              text="Tables, the chart, and the SQL that passed the sanity check land here."
+              msPerChar={30}
+            />
+          )}
         </p>
       </div>
     );
   }
+  return <AnswerResult result={result} onOpenDashboard={onOpenDashboard} />;
+}
+
+function AnswerResult({
+  result,
+  onOpenDashboard,
+}: {
+  result: NonNullable<ChatMessage["result"]>;
+  onOpenDashboard: (id: string) => void;
+}) {
+  const [typed, setTyped] = useState<string | null>(null);
+  const done = typed === result.answer;
   return (
     <div className="space-y-3">
       <article className="rounded-xl bg-card p-4 ring-1 ring-foreground/10">
         <h2 className="font-heading text-xl">Answer</h2>
-        <p className="mt-2 text-sm leading-6">{result.answer}</p>
+        <p className="mt-2 text-sm leading-6" aria-live="polite">
+          <Typewriter text={result.answer} msPerChar={8} maxDurationMs={2500} onDone={() => setTyped(result.answer)} />
+        </p>
       </article>
+      {!done ? null : (
+      <div className="tw-fade-in space-y-3">
       {result.chart ? (
         <article className="rounded-xl bg-card p-4 ring-1 ring-foreground/10">
           <h3 className="text-sm font-medium">{result.chart.title}</h3>
@@ -605,6 +637,8 @@ function AnswerPanel({
           Open dashboard
         </Button>
       ) : null}
+      </div>
+      )}
     </div>
   );
 }

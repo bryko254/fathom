@@ -128,3 +128,44 @@
     @apply font-sans;
   }
 }
+/* Typewriter caret + thinking indicator */
+.tw-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: currentColor;
+  animation: tw-blink 1s steps(1) infinite;
+}
+@keyframes tw-blink {
+  50% { opacity: 0; }
+}
+.tw-thinking {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.tw-thinking > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--primary);
+  animation: tw-pulse 1.2s ease-in-out infinite;
+}
+.tw-thinking > span:nth-child(2) { animation-delay: 0.15s; }
+.tw-thinking > span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes tw-pulse {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+.tw-fade-in { animation: tw-fade 0.4s ease-out both; }
+@keyframes tw-fade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tw-caret, .tw-thinking > span, .tw-fade-in { animation: none; }
+}
